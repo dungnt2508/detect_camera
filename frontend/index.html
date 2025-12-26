@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Detect - Touchless Interaction</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #000;
+            color: #fff;
+            overflow: hidden;
+        }
+        
+        #videoCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            background: #000;
+        }
+        
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            cursor: none;
+            pointer-events: none;
+        }
+        
+        #status {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 12px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            z-index: 1000;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+        }
+        
+        #status .status-item {
+            margin: 4px 0;
+            line-height: 1.4;
+        }
+        
+        #status .status-label {
+            color: #aaa;
+            margin-right: 8px;
+            font-size: 12px;
+        }
+        
+        #status .status-value {
+            color: #0f0;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        
+        #status .status-value.disconnected {
+            color: #f44;
+        }
+        
+        #item-list {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+        
+        #item-list.visible {
+            opacity: 1;
+        }
+        
+        .item-card {
+            width: 100px;
+            height: 100px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #444;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #888;
+            font-size: 12px;
+            transition: all 0.2s ease;
+            backdrop-filter: blur(5px);
+        }
+        
+        .item-card.active {
+            border-color: #0ff;
+            background: rgba(0, 255, 255, 0.15);
+            color: #0ff;
+            transform: scale(1.15);
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="videoCanvas"></canvas>
+    <canvas id="overlayCanvas"></canvas>
+    <div id="status">
+        <div class="status-item">
+            <span class="status-label">WebSocket:</span>
+            <span class="status-value" id="ws-status">Đang kết nối...</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">State:</span>
+            <span class="status-value" id="state-status">IDLE</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Gesture:</span>
+            <span class="status-value" id="gesture-status">-</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Item:</span>
+            <span class="status-value" id="item-status">-</span>
+        </div>
+    </div>
+    
+    <div id="item-list"></div>
+    
+    <script>
+        class VideoRenderer {
+            constructor() {
+                this.videoCanvas = document.getElementById('videoCanvas');
+                this.videoCtx = this.videoCanvas.getContext('2d');
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+                
+                this.videoImg = new Image();
+                this.videoImg.crossOrigin = 'anonymous';
+                this.videoImg.onload = () => this.drawVideo();
+                this.videoImg.onerror = (e) => {
+                    console.error('Lỗi tải video stream:', e);
+                };
+                
+                // Bắt đầu load video stream
+                this.videoImg.src = 'http://localhost:9000/video?' + Date.now();
+            }
+            
+            resize() {
+                this.videoCanvas.width = window.innerWidth;
+                this.videoCanvas.height = window.innerHeight;
+            }
+            
+            drawVideo() {
+                // Vẽ video frame lên canvas
+                this.videoCtx.drawImage(
+                    this.videoImg,
+                    0, 0,
+                    this.videoCanvas.width,
+                    this.videoCanvas.height
+                );
+            }
+        }
+        
+        class OverlayRenderer {
+            constructor() {
+                this.canvas = document.getElementById('overlayCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+                
+                this.cursor = { x: 0, y: 0, visible: false };
+                this.currentItemIndex = 0;
+                this.items = ['Item 1', 'Item 2', 'Item 3', 'Item 4', 'Item 5'];
+                this.itemTransform = null;
+                this.currentState = 'IDLE';
+                this.cursorTimeout = null;
+                
+                this.animate();
+            }
+            
+            resize() {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+            }
+            
+            animate() {
+                this.clear();
+                this.drawCursor();
+                this.drawItem();
+                requestAnimationFrame(() => this.animate());
+            }
+            
+            clear() {
+                // Clear với transparent để thấy video bên dưới
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            }
+            
+            drawCursor() {
+                if (!this.cursor.visible) return;
+                
+                const { x, y } = this.cursor;
+                
+                // Vẽ cursor với glow effect
+                this.ctx.shadowBlur = 15;
+                this.ctx.shadowColor = '#0ff';
+                
+                // Vòng tròn ngoài
+                this.ctx.strokeStyle = '#0ff';
+                this.ctx.lineWidth = 2;
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, 12, 0, Math.PI * 2);
+                this.ctx.stroke();
+                
+                // Vòng tròn trong
+                this.ctx.fillStyle = 'rgba(0, 255, 255, 0.3)';
+                this.ctx.beginPath();
+                this.ctx.arc(x, y, 6, 0, Math.PI * 2);
+                this.ctx.fill();
+                
+                // Crosshair
+                this.ctx.shadowBlur = 0;
+                this.ctx.strokeStyle = '#0ff';
+                this.ctx.lineWidth = 1.5;
+                this.ctx.beginPath();
+                this.ctx.moveTo(x - 18, y);
+                this.ctx.lineTo(x + 18, y);
+                this.ctx.moveTo(x, y - 18);
+                this.ctx.lineTo(x, y + 18);
+                this.ctx.stroke();
+            }
+            
+            drawItem() {
+                if (this.currentState !== 'TRY_ON' || !this.itemTransform) return;
+                
+                const { anchor, rotation, scale } = this.itemTransform;
+                const normalizedScale = Math.max(0.4, Math.min(1.8, scale)) * 0.4;
+                
+                this.ctx.save();
+                this.ctx.translate(anchor.x, anchor.y);
+                this.ctx.rotate(rotation);
+                this.ctx.scale(normalizedScale, normalizedScale);
+                
+                // Glow effect
+                this.ctx.shadowBlur = 20;
+                this.ctx.shadowColor = '#0f0';
+                
+                // Vẽ item với border
+                this.ctx.strokeStyle = '#0f0';
+                this.ctx.lineWidth = 3;
+                this.ctx.strokeRect(-50, -50, 100, 100);
+                
+                // Fill với transparency
+                this.ctx.fillStyle = 'rgba(0, 255, 0, 0.1)';
+                this.ctx.fillRect(-50, -50, 100, 100);
+                
+                // Text
+                this.ctx.shadowBlur = 10;
+                this.ctx.fillStyle = '#0f0';
+                this.ctx.font = 'bold 14px Arial';
+                this.ctx.textAlign = 'center';
+                this.ctx.fillText(this.items[this.currentItemIndex], 0, 5);
+                
+                this.ctx.restore();
+            }
+            
+            updateCursor(x, y) {
+                this.cursor.x = x;
+                this.cursor.y = y;
+                this.cursor.visible = true;
+                
+                if (this.cursorTimeout) {
+                    clearTimeout(this.cursorTimeout);
+                }
+                this.cursorTimeout = setTimeout(() => {
+                    this.cursor.visible = false;
+                }, 1000);
+            }
+            
+            updateItemTransform(anchor, rotation, scale) {
+                this.itemTransform = { anchor, rotation, scale };
+            }
+            
+            updateState(state) {
+                this.currentState = state;
+                this.updateItemListVisibility();
+            }
+            
+            changeItem(direction) {
+                if (direction === 'left') {
+                    this.currentItemIndex = (this.currentItemIndex - 1 + this.items.length) % this.items.length;
+                } else if (direction === 'right') {
+                    this.currentItemIndex = (this.currentItemIndex + 1) % this.items.length;
+                }
+                this.updateItemList();
+            }
+            
+            updateItemList() {
+                const itemList = document.getElementById('item-list');
+                itemList.innerHTML = '';
+                
+                this.items.forEach((item, index) => {
+                    const card = document.createElement('div');
+                    card.className = 'item-card';
+                    if (index === this.currentItemIndex) {
+                        card.classList.add('active');
+                    }
+                    card.textContent = item;
+                    itemList.appendChild(card);
+                });
+            }
+            
+            updateItemListVisibility() {
+                const itemList = document.getElementById('item-list');
+                if (this.currentState === 'BROWSE_ITEM' || this.currentState === 'TRY_ON') {
+                    itemList.classList.add('visible');
+                } else {
+                    itemList.classList.remove('visible');
+                }
+            }
+        }
+        
+        class WebSocketClient {
+            constructor(overlayRenderer) {
+                this.overlayRenderer = overlayRenderer;
+                this.ws = null;
+                this.reconnectInterval = 3000;
+                this.connect();
+            }
+            
+            connect() {
+                this.ws = new WebSocket('ws://localhost:8765');
+                
+                this.ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    this.updateStatus('ws-status', 'Đã kết nối', false);
+                };
+                
+                this.ws.onmessage = (event) => {
+                    if (event.data === 'pong') return;
+                    
+                    try {
+                        const payload = JSON.parse(event.data);
+                        this.handleMessage(payload);
+                    } catch (e) {
+                        console.error('Parse error:', e);
+                    }
+                };
+                
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                };
+                
+                this.ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    this.updateStatus('ws-status', 'Mất kết nối', true);
+                    setTimeout(() => this.connect(), this.reconnectInterval);
+                };
+                
+                setInterval(() => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send('ping');
+                    }
+                }, 30000);
+            }
+            
+            handleMessage(payload) {
+                const { type } = payload;
+                
+                switch (type) {
+                    case 'CURSOR_MOVE':
+                        this.overlayRenderer.updateCursor(payload.x, payload.y);
+                        break;
+                    
+                    case 'GESTURE':
+                        this.updateStatus('gesture-status', payload.gesture);
+                        if (payload.gesture === 'SWIPE_LEFT') {
+                            this.overlayRenderer.changeItem('left');
+                        } else if (payload.gesture === 'SWIPE_RIGHT') {
+                            this.overlayRenderer.changeItem('right');
+                        }
+                        break;
+                    
+                    case 'ITEM_TRANSFORM':
+                        this.overlayRenderer.updateItemTransform(
+                            payload.anchor,
+                            payload.rotation,
+                            payload.scale
+                        );
+                        break;
+                    
+                    case 'STATE_CHANGE':
+                        this.overlayRenderer.updateState(payload.state);
+                        this.updateStatus('state-status', payload.state);
+                        break;
+                }
+                
+                this.updateStatus('item-status', 
+                    `${this.overlayRenderer.currentItemIndex + 1}/${this.overlayRenderer.items.length}`);
+            }
+            
+            updateStatus(id, value, isError = false) {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.textContent = value;
+                    if (isError) {
+                        element.classList.add('disconnected');
+                    } else {
+                        element.classList.remove('disconnected');
+                    }
+                }
+            }
+        }
+        
+        // Khởi tạo
+        const videoRenderer = new VideoRenderer();
+        const overlayRenderer = new OverlayRenderer();
+        const wsClient = new WebSocketClient(overlayRenderer);
+        
+        // Khởi tạo item list
+        overlayRenderer.updateItemList();
+    </script>
+</body>
+</html>

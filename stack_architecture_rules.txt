@@ -1,0 +1,174 @@
+0.STACK – PYTHON HYBRID 
+Core
+	Python 3.9
+	MediaPipe
+	OpenCV
+
+Bridge
+WebSocket / ZeroMQ
+
+Frontend
+Three.js / Canvas
+
+I. BÀI TOÁN (CHUẨN HÓA)
+
+Xây dựng hệ thống tương tác không chạm bằng camera, trong đó:
+	- Tay người dùng dùng để điều khiển UI (giống thiết bị input).
+	- Cơ thể (cổ/mặt) dùng làm anchor để gắn sản phẩm (try-on).
+	- Hệ thống chạy realtime, không train user, không ML custom.
+	- Toàn bộ logic nằm ở backend; frontend chỉ vẽ.
+
+Bản chất:
+Camera → đo chuyển động → suy luận hình học → phát sự kiện → vẽ theo lệnh
+
+II. KHUNG KIẾN TRÚC (LOGICAL ARCHITECTURE)
+
+[Camera]
+   ↓
+[OpenCV Capture]
+   ↓
+[MediaPipe Perception]
+   ↓
+[Normalization + Smoothing]
+   ↓
+[Motion Feature Extraction]
+   ↓
+[Gesture Detection]
+   ↓
+[State Machine]
+   ↓
+[WebSocket]
+   ↓
+[HTML Canvas Renderer]
+
+Luồng một chiều, không phản hồi ngược.
+
+III. PHÂN TẦNG RÕ RÀNG
+1. Sensor Layer
+	- OpenCV đọc frame.
+	- Không xử lý logic.
+
+2. Perception Layer
+	- MediaPipe Hands: lấy 21 landmark tay.
+	- MediaPipe Face Mesh / Pose: lấy landmark mặt/cổ.
+	- Output là tọa độ thô (x, y, z).
+
+3. Normalization Layer
+	- Chuyển normalized → pixel space.
+	- Smoothing, debounce.
+	- Không có gesture, không có UI.
+
+4. Motion Feature Layer
+	- Tính:
+		- vector chuyển động
+		- velocity
+		- distance
+		- depth feature từ z
+	- Đây là tầng toán học.
+
+5. Gesture Layer
+	- Nhận chuỗi feature theo thời gian.
+	- Phát event rời rạc:
+		SWIPE_LEFT
+		SWIPE_RIGHT
+		PINCH
+		HOLD
+
+	- Không biết UI, không biết item.
+
+6. State Machine
+	- Quản lý trạng thái hệ thống:
+		IDLE
+		BROWSE_ITEM
+		TRY_ON
+
+	- Quyết định gesture nào hợp lệ.
+
+7. Bridge Layer
+	- Gửi dữ liệu sang frontend qua WebSocket:
+		cursor position
+		gesture event
+		item transform
+
+8. Frontend Renderer
+	- HTML + Canvas.
+	- Vẽ theo dữ liệu nhận được.
+	- Không suy luận, không xử lý AI.
+
+
+IV. FLOW HOẠT ĐỘNG
+FLOW A – KHỞI TẠO
+- Init camera.
+- Init MediaPipe Hands.
+- Init WebSocket.
+- Frontend load UI canvas.	
+
+FLOW B – BROWSE ITEM (ĐIỀU KHIỂN UI)
+- User đưa tay vào camera.
+- MediaPipe trả landmark tay.
+- Normalize → screen (x, y).
+- Emit CURSOR_MOVE(x, y).
+- Gesture layer detect:
+- SWIPE_LEFT hoặc SWIPE_RIGHT.
+- State = BROWSE_ITEM.
+- Emit event sang frontend.
+- Frontend đổi item.
+
+Tay lúc này đóng vai trò continuous controller, không phải chuột.
+
+FLOW C – CHỌN ITEM → TRY-ON
+- User confirm item (pinch / hold).
+- State chuyển TRY_ON.
+- Enable Face / Pose tracking.
+
+FLOW D – TRY-ON (GẮN SẢN PHẨM)
+- MediaPipe Face/Pose trả landmark.
+- Tính:
+	anchor cổ (x, y)
+	rotation theo orientation đầu
+	scale theo kích thước mặt/vai
+- Build transform matrix.
+- Emit ITEM_TRANSFORM.
+- Frontend render item lên cổ.
+- User xoay đầu → transform update realtime.
+- Hand gesture vẫn chạy song song để:
+	đổi item
+	remove
+	confirm
+
+V. VAI TRÒ XYZ (CHUẨN)
+- X, Y: vị trí 2D trên màn hình.
+- Z:
+	- không phải mét
+	- không dùng trực tiếp
+	- chỉ dùng để suy luận:
+		- depth tương đối
+		- scale
+		- phân biệt intent vs noise	
+
+VI. BACKEND
+Backend MUST be split into modules:
+
+- camera.py        # capture frame only
+- perception.py    # MediaPipe hand / face detection
+- normalize.py     # coordinate normalize + smoothing
+- motion.py        # distance, velocity, direction
+- gesture.py       # swipe, pinch, hold detection
+- state.py         # finite state machine
+- bridge.py        # WebSocket emit
+- main.py          # main loop only
+
+VII. NGUYÊN TẮC KIẾN TRÚC BẤT DI BẤT DỊCH
+- Không được gộp nhiều tầng logic vào cùng một file
+- Backend chỉ phát EVENT, không phát ý định UI
+- Frontend chỉ phản ứng theo type, không đoán
+- Mỗi event = 1 hành động logic, không gộp
+- Không event “lai” (vừa move vừa click)
+- Payload luôn fixed key, không optional lung tung
+- Không fake mouse.
+- Không DOM animation.
+- Không train user.		
+- Ưu tiên đúng kiến trúc hơn đẹp code
+- Không overengineering
+- Không thêm framework thừa
+- Nếu thiếu thông tin, tự quyết theo nguyên tắc kiến trúc trên, không hỏi ngược
