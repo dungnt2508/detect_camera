@@ -61,10 +61,20 @@ class Normalizer:
         self.screen_width = screen_width
         self.screen_height = screen_height
         
-        # Một bộ lọc cho X và một cho Y để xử lý vector
+        # OneEuroFilter cho finger cursor (X, Y)
         # min_cutoff: càng thấp càng lọc rung tốt khi đứng yên
         # beta: càng cao càng giảm lag khi di chuyển nhanh
-        self.filter = OneEuroFilter(min_cutoff=0.5, beta=0.01)
+        self.cursor_filter = OneEuroFilter(min_cutoff=0.5, beta=0.01)
+        
+        # OneEuroFilter cho neck anchor (X, Y) - try-on
+        self.neck_anchor_filter = OneEuroFilter(min_cutoff=0.3, beta=0.005)
+        
+        # OneEuroFilter cho face rotation (single value)
+        self.rotation_filter = OneEuroFilter(min_cutoff=0.4, beta=0.01)
+        
+        # OneEuroFilter cho face scale (single value)
+        self.scale_filter = OneEuroFilter(min_cutoff=0.2, beta=0.005)
+        
         self.last_time = None
     
     def normalize_to_pixel(self, normalized_x, normalized_y):
@@ -86,7 +96,7 @@ class Normalizer:
     
     def smooth_position(self, x, y):
         """
-        Làm mượt vị trí bằng One Euro Filter
+        Làm mượt vị trí bằng One Euro Filter (cho finger cursor)
         Args:
             x, y: normalized coordinates
         Returns:
@@ -99,8 +109,56 @@ class Normalizer:
         self.last_time = now
 
         # Áp dụng filter cho vector (x, y)
-        smoothed = self.filter(np.array([x, y]), dt=dt)
+        smoothed = self.cursor_filter(np.array([x, y]), dt=dt)
         return float(smoothed[0]), float(smoothed[1])
+    
+    def smooth_neck_anchor(self, x, y):
+        """
+        Làm mượt neck anchor position (cho try-on)
+        Args:
+            x, y: normalized coordinates
+        Returns:
+            tuple: (smoothed_x, smoothed_y) normalized
+        """
+        now = time.time()
+        dt = None
+        if self.last_time is not None:
+            dt = now - self.last_time
+        
+        smoothed = self.neck_anchor_filter(np.array([x, y]), dt=dt)
+        return float(smoothed[0]), float(smoothed[1])
+    
+    def smooth_rotation(self, rotation):
+        """
+        Làm mượt face rotation angle
+        Args:
+            rotation: float (radians)
+        Returns:
+            float: smoothed rotation
+        """
+        now = time.time()
+        dt = None
+        if self.last_time is not None:
+            dt = now - self.last_time
+        
+        smoothed = self.rotation_filter(np.array([rotation]), dt=dt)
+        return float(smoothed[0])
+    
+    def smooth_scale(self, scale):
+        """
+        Làm mượt face scale
+        Args:
+            scale: float
+        Returns:
+            float: smoothed scale
+        """
+        now = time.time()
+        dt = None
+        if self.last_time is not None:
+            dt = now - self.last_time
+        
+        smoothed = self.scale_filter(np.array([scale]), dt=dt)
+        return float(smoothed[0])
     
     def get_index_finger_position(self, hand_landmarks):
         """

@@ -53,6 +53,7 @@ class System:
         # State tracking
         self.last_hand_landmarks = None
         self.frame_count = 0
+        self.dropped_frames = 0
         self.start_time = time.time()
         self.current_frame_bgr = None
         self.frame_lock = threading.Lock()
@@ -90,7 +91,7 @@ class System:
                     self.current_frame_bgr = frame_bgr.copy()
             
             # 2. Perception & Logic: Đẩy sang thread khác để không lag camera
-            # Chỉ chạy task mới nếu task cũ đã xong (skip frames nếu xử lý chậm)
+            # Frame Dropping: Bỏ qua frame mới nếu executor đang busy để tránh latency tích lũy
             if self.perception_task is None or self.perception_task.done():
                 self.perception_task = loop.run_in_executor(
                     self.executor, self._sync_logic, frame_rgb
@@ -99,6 +100,12 @@ class System:
                 self.perception_task.add_done_callback(
                     lambda fut: asyncio.run_coroutine_threadsafe(self._emit_results(fut.result()), loop)
                 )
+                self.frame_count += 1
+            else:
+                # Executor đang busy - drop frame để duy trì realtime
+                self.dropped_frames += 1
+                if self.dropped_frames % 30 == 0:  # Log mỗi 30 frames
+                    print(f"Frame dropping: {self.dropped_frames} frames dropped (maintaining realtime)")
 
             # Check timeout state machine
             if self.state_machine.check_timeout():
@@ -134,13 +141,23 @@ class System:
         if self.state_machine.get_state() == SystemState.TRY_ON:
             face_data = self.perception.process_face(frame_rgb)
             if face_data:
-                anchor_x, anchor_y = self.normalizer.normalize_to_pixel(
-                    face_data['neck_anchor'][0], face_data['neck_anchor'][1]
+                # Smooth neck anchor
+                smooth_anchor = self.normalizer.smooth_neck_anchor(
+                    face_data['neck_anchor'][0], 
+                    face_data['neck_anchor'][1]
                 )
+                anchor_x, anchor_y = self.normalizer.normalize_to_pixel(
+                    smooth_anchor[0], smooth_anchor[1]
+                )
+                
+                # Smooth rotation và scale
+                smooth_rotation = self.normalizer.smooth_rotation(face_data['rotation'])
+                smooth_scale = self.normalizer.smooth_scale(face_data['face_scale'])
+                
                 results['transform'] = {
                     'anchor': (anchor_x, anchor_y),
-                    'rotation': face_data['rotation'],
-                    'scale': face_data['face_scale']
+                    'rotation': smooth_rotation,
+                    'scale': smooth_scale
                 }
         
         return results
